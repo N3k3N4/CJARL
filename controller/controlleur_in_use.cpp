@@ -1,5 +1,5 @@
 /* maj_utilisé le 25/09/2025 */
-/* Version : boutons joystick standard + boite H */
+/* Version : boutons joystick standard + boite H + limitation volant */
 
 #include <Joystick.h>
 
@@ -77,10 +77,18 @@ void loop() {
   int valAccel  = readSmooth(potAccel);
   int valFrein  = readSmooth(potFrein);
 
-  // --- Volant ---
+  // --- Volant avec limitation explicite ---
   float normVolant = (float)(valVolant - centreVolant) / 511.0; // [-1 .. +1]
+
+  // --- Zone morte autour du centre ±2% ---
+  if (abs(normVolant) < 0.02) normVolant = 0;
+
+  // --- Limitation explicite des extrêmes ---
+  if (normVolant > 1.0) normVolant = 1.0;
+  if (normVolant < -1.0) normVolant = -1.0;
+
   float sign = (normVolant >= 0) ? 1.0 : -1.0;
-  float expo = 1.0;
+  float expo = 1.0; // exponentiel linéaire, changer >1 pour plus de sensibilité au centre
   float volantMapped = sign * pow(abs(normVolant), expo) * 32767.0;
 
   // --- Pédales ---
