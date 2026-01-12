@@ -1,56 +1,42 @@
 /* maj_utilisé le 02/01/2026 */
-/* Pédales et axes configurés sur plages fixes pour Joystick */
+/* Pédales fixées avec plages personnalisées + boutons + boîte H */
 
 #include <Joystick.h>
 
-// ======================
-// CREATION DU JOYSTICK HID
-// ======================
+// --- Création du joystick HID ---
 Joystick_ Joystick(
   JOYSTICK_DEFAULT_REPORT_ID,
   JOYSTICK_TYPE_GAMEPAD,
-  8, 0,             // 8 boutons max
+  8, 0,             // 8 boutons au total : 2 standards + 6 vitesses
   true, true, true, // X, Y, Z axes activés
   true, false, false,
   false, false, false, false, false
 );
 
-// ======================
-// BROCHES POTENTIOMETRES
-// ======================
-const int potVolant = A0; // volant
-const int potAccel  = A3; // accélérateur
-const int potFrein  = A1; // frein
-const int potEmbr   = A2; // embrayage / rotation X
+// --- Broches potentiomètres ---
+const int potVolant = A0; // Volant
+const int potAccel  = A3; // Accélérateur
+const int potFrein  = A1; // Frein
+const int potEmbr   = A2; // Embrayage / rotation X
 
-// ======================
-// BOUTONS
-// ======================
-const int buttonLeft  = 2;
-const int buttonRight = 3;
+// --- Broches boutons standards ---
+const int buttonLeft  = 2; // bouton joystick n°0
+const int buttonRight = 3; // bouton joystick n°1
 
-// ======================
-// BOITE H
-// ======================
+// --- Broches boîte H (6 boutons) ---
 const int gearPins[6] = {4, 5, 6, 7, 8, 9};
 
-// ======================
-// VOLANT
-// ======================
+// --- Valeur centrale du volant ---
 const int centreVolant = 512;
 
-// ======================
-// LISSAGE EMA
-// ======================
+// --- Lissage EMA ---
 float accelSmooth = 0;
 float freinSmooth = 0;
 float embrSmooth  = 0;
-const float alpha = 0.15; // filtre exponentiel
+const float alpha = 0.15;
 
-// ======================
-// PLAGES FIXES
-// ======================
-const int accelMin = 963;
+// --- Plages fixes ---
+const int accelMin = 890;
 const int accelMax = 1023;
 
 const int freinMin = 890;
@@ -59,18 +45,14 @@ const int freinMax = 1023;
 const int embrMin  = 890;
 const int embrMax  = 1023;
 
-// ======================
-// LECTURE MOYENNE ANTI-BRUIT
-// ======================
+// --- Lecture moyenne anti-bruit ---
 int readSmooth(int pin) {
   int sum = 0;
   for (int i = 0; i < 5; i++) sum += analogRead(pin);
   return sum / 5;
 }
 
-// ======================
-// MAPPING SECURISE DES PEDALES
-// ======================
+// --- Mapping pédales vers joystick ---
 int mapPedale(int val, int minVal, int maxVal) {
   if (val > maxVal) val = maxVal;
   if (val < minVal) val = minVal;
@@ -82,63 +64,76 @@ void setup() {
   Serial.begin(115200);
 
   Joystick.begin();
-  Joystick.setXAxisRange(-32767, 32767);
-  Joystick.setYAxisRange(0, 32767);
-  Joystick.setZAxisRange(0, 32767);
-  Joystick.setRxAxisRange(0, 32767);
+  Joystick.setXAxisRange(-32767, 32767); // Volant
+  Joystick.setYAxisRange(0, 32767);      // Accélérateur
+  Joystick.setZAxisRange(0, 32767);      // Frein
+  Joystick.setRxAxisRange(0, 32767);     // Embrayage / rotation X
 
+  // --- Initialisation boutons ---
   pinMode(buttonLeft, INPUT_PULLUP);
   pinMode(buttonRight, INPUT_PULLUP);
 
+  // --- Initialisation boîte H ---
   for (int i = 0; i < 6; i++) pinMode(gearPins[i], INPUT_PULLUP);
 
-  Serial.println("Configuration des pédales et axes fixée pour Joystick");
+  Serial.println("Configuration pédales + boutons + boîte H prête");
 }
 
 void loop() {
+  // --- Lecture des potentiomètres ---
   int valVolant = readSmooth(potVolant);
   int valAccel  = readSmooth(potAccel);
   int valFrein  = readSmooth(potFrein);
   int valEmbr   = readSmooth(potEmbr);
 
-  // ======================
-  // VOLANT (X)
-  // ======================
+  // --- Volant (X) avec limitation ±2% autour du centre ---
   float normVolant = (float)(valVolant - centreVolant) / 511.0;
-  int volantMapped = normVolant * 32767.0;
+  if (abs(normVolant) < 0.02) normVolant = 0;
+  if (normVolant > 1.0) normVolant = 1.0;
+  if (normVolant < -1.0) normVolant = -1.0;
+  float sign = (normVolant >= 0) ? 1.0 : -1.0;
+  float expo = 1.0; // exponentiel linéaire
+  float volantMapped = sign * pow(abs(normVolant), expo) * 32767.0;
 
-  // ======================
-  // MAPPING DES PEDALES SUR PLAGE FIXE + LISSAGE EMA
-  // ======================
-  int accelMapped = mapPedale(valAccel, accelMin, accelMax);  // Y
-  int freinMapped = mapPedale(valFrein, freinMin, freinMax); // Z
-  int embrMapped  = mapPedale(valEmbr, embrMin, embrMax);     // Rx
+  // --- Mapping des pédales + lissage EMA ---
+  int accelMapped = mapPedale(valAccel, accelMin, accelMax);
+  int freinMapped = mapPedale(valFrein, freinMin, freinMax);
+  int embrMapped  = mapPedale(valEmbr, embrMin, embrMax);
 
   accelSmooth = alpha * accelMapped + (1 - alpha) * accelSmooth;
   freinSmooth = alpha * freinMapped + (1 - alpha) * freinSmooth;
   embrSmooth  = alpha * embrMapped  + (1 - alpha) * embrSmooth;
 
-  // ======================
-  // ENVOI VERS JOYSTICK
-  // ======================
-  Joystick.setXAxis(volantMapped);       // Volant
-  Joystick.setYAxis((int)accelSmooth);   // Accélérateur
-  Joystick.setZAxis((int)freinSmooth);   // Frein
-  Joystick.setRxAxis((int)embrSmooth);   // Embrayage / Rotation X
+  // --- Envoi vers le joystick ---
+  Joystick.setXAxis((int)volantMapped);
+  Joystick.setYAxis((int)accelSmooth);
+  Joystick.setZAxis((int)freinSmooth);
+  Joystick.setRxAxis((int)embrSmooth);
 
-  // ======================
-  // BOUTONS
-  // ======================
-  Joystick.setButton(0, !digitalRead(buttonLeft));  // Inversion logique car INPUT_PULLUP
-  Joystick.setButton(1, !digitalRead(buttonRight));
+  // --- Boutons standards ---
+  Joystick.setButton(0, digitalRead(buttonLeft)  == LOW ? 1 : 0);
+  Joystick.setButton(1, digitalRead(buttonRight) == LOW ? 1 : 0);
 
-  // ======================
-  // DEBUG SERIAL MONITOR
-  // ======================
+  // --- Lecture boîte H (6 vitesses) ---
+  int gearDetected = 0;
+  for (int i = 0; i < 6; i++) {
+    if (digitalRead(gearPins[i]) == LOW) gearDetected = i + 1;
+  }
+
+  // --- Mise à jour des boutons de vitesses ---
+  for (int i = 0; i < 6; i++) {
+    Joystick.setButton(i + 2, (gearDetected == (i + 1)) ? 1 : 0);
+  }
+
+  // --- Debug série ---
   Serial.print("Volant : "); Serial.print(valVolant); Serial.print(" | ");
   Serial.print("Accel : ");  Serial.print(valAccel);  Serial.print(" | ");
   Serial.print("Frein : ");  Serial.print(valFrein);  Serial.print(" | ");
-  Serial.print("Embr : ");   Serial.println(valEmbr);
+  Serial.print("Embr : ");   Serial.print(valEmbr);   Serial.print(" | ");
+  if (gearDetected == 0) Serial.println("Point mort (N)");
+  else {
+    Serial.print("Vitesse : "); Serial.println(gearDetected);
+  }
 
-  delay(10);
+  delay(10); // ~100 Hz
 }
