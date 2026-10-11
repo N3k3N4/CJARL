@@ -1,11 +1,20 @@
 /*
   Simulateur de volant - Arduino Leonardo
-  Version avec affichage dans le Serial Plotter (IDE Arduino > Outils > Traceur serie)
-  Vitesse du moniteur/traceur : 115200 bauds
+  Version v5 : compensation de la zone morte au centre APRES conversion joystick
+  Serial Plotter : IDE Arduino > Outils > Traceur serie (115200 bauds)
 
   PLOT_MODE 0 : valeurs brutes des potentiometres (0 a 1023)
   PLOT_MODE 1 : valeurs envoyees au PC en pourcentage
                 (volant -100..+100, pedales 0..100)
+
+  POURQUOI CETTE VERSION
+  Le systeme qui lit la manette (Linux jstest, Windows, jeu...) applique souvent
+  SA PROPRE zone morte autour de 0 : tant que la valeur joystick reste dans
+  cette zone, il affiche 0. On a alors l'impression que le volant "reste
+  bloque" au centre plus longtemps qu'ailleurs.
+  Solution : faire SAUTER la valeur envoyee par-dessus cette zone, de facon
+  que le systeme la supprime et que le passage au centre dure le meme temps
+  que sur le reste de la course.
 */
 
 #include <Joystick.h>
@@ -38,7 +47,7 @@ const int gearPins[6] = {4, 5, 6, 7, 8, 9};
 // =====================================================================
 //                     REGLAGES DU VOLANT (modifiables)
 // =====================================================================
-// Relevez ces 3 valeurs avec le Serial Plotter en mode 0 (PLOT_MODE 0) :
+// Relevez ces 3 valeurs avec le Serial Plotter en mode 0 :
 //   centreVolant : valeur lue quand le volant est bien droit
 //   volantMin    : valeur lue en butee gauche complete
 //   volantMax    : valeur lue en butee droite complete
@@ -47,26 +56,47 @@ const int volantMin    = 0;
 const int volantMax    = 1023;
 
 // =====================================================================
+//       COMPENSATION DE LA ZONE MORTE (valeur apres conversion joystick)
+// =====================================================================
+// Echelle joystick : -32767 .. 0 .. +32767
+//
+// ANTI_DZ_DEBUT : valeur envoyee des que le volant quitte le centre.
+//                 Elle doit etre egale a la zone morte du systeme.
+//                 0 = desactive (conversion lineaire pure).
+//                 Linux (jstest) : environ 4095 (valeur par defaut ici)
+//                 Jeu avec zone morte de X % : X/100 * 32767
+//                   (ex : 10 % -> 3277, 5 % -> 1638)
+//
+// ANTI_DZ_FIN   : marge laissee en butee. Le systeme sature avant la butee
+//                 quand il applique sa zone morte aux deux extremites
+//                 (Linux jstest : 4095). Mettez 0 si vos butees ne sont pas
+//                 atteintes a cause de ce reglage au contraire.
+//
+// REGLAGE FIN :
+//  - le volant reste encore trop longtemps a 0 -> AUGMENTEZ ANTI_DZ_DEBUT
+//  - un saut brusque apparait autour du centre -> DIMINUEZ ANTI_DZ_DEBUT
+//  - butee atteinte trop tot (saturation avant la fin de course) -> AUGMENTEZ
+//    ANTI_DZ_FIN ; butee jamais atteinte -> DIMINUEZ ANTI_DZ_FIN
+const float ANTI_DZ_DEBUT = 4095;
+const float ANTI_DZ_FIN   = 4095;
+
+// Tolerance autour du centre (en fraction de course) : evite que le bruit du
+// potentiometre fasse sauter la valeur entre -DEBUT, 0 et +DEBUT quand le
+// volant ne bouge pas. 0.0015 = environ 1 unite sur 1023.
+// Utilisee seulement si ANTI_DZ_DEBUT > 0.
+const float TOLERANCE_CENTRE = 0.0015;
+
+// =====================================================================
 //                    REGLAGES DES PEDALES (modifiables)
 // =====================================================================
-// Chaque pedale utilise 2 valeurs lues sur le potentiometre (0 a 1023) :
-//
 //   xxxMax = valeur lue quand la pedale est RELACHEE (au repos)
 //   xxxMin = valeur lue quand la pedale est ENFONCEE A FOND
-//
-// ATTENTION : avec ce montage, la valeur DIMINUE quand on appuie.
-//   Pedale relachee  -> valeur haute (ex : 1023)  -> sortie PC = 0 %
-//   Pedale a fond    -> valeur basse (ex : 890)   -> sortie PC = 100 %
-//
-// COMMENT LES REGLER :
-//   1. Mettez PLOT_MODE a 0 et ouvrez le Serial Plotter.
-//   2. Pedale relachee : notez la valeur de la courbe -> c'est xxxMax.
-//   3. Pedale enfoncee a fond : notez la valeur -> c'est xxxMin.
-//   4. Gardez une petite marge (3 a 5 unites) pour atteindre bien 0 % et 100 %.
-//   5. xxxMin doit TOUJOURS etre strictement inferieur a xxxMax.
-//
-// Si la pedale n'atteint jamais 100 %    -> augmentez xxxMin.
-// Si la pedale reste a plus de 0 % au repos -> diminuez xxxMax.
+// La valeur DIMINUE quand on appuie :
+//   relachee -> valeur haute (ex : 1023) -> sortie PC = 0 %
+//   a fond   -> valeur basse (ex : 890)  -> sortie PC = 100 %
+// xxxMin doit TOUJOURS etre strictement inferieur a xxxMax.
+// Pedale n'atteint pas 100 %       -> augmentez xxxMin.
+// Pedale reste > 0 % au repos      -> diminuez xxxMax.
 
 // --- Accelerateur (broche A3) ---
 const int accelMin = 890;    // pedale a fond
@@ -87,18 +117,22 @@ float volantSmooth = 0;
 float accelSmooth  = 0;
 float freinSmooth  = 0;
 float embrSmooth   = 0;
-const float alphaVolant = 0.30;  // 1.0 = aucun lissage, petit = plus lisse
+const float alphaVolant = 0.40;  // 1.0 = aucun lissage, petit = plus lisse
 const float alpha       = 0.15;  // pedales
 
-int readSmooth(int pin) {
-  int sum = 0;
+// Lecture moyenne en decimal
+float readSmoothF(int pin) {
+  long sum = 0;
   for (int i = 0; i < 8; i++) sum += analogRead(pin);
-  return sum / 8;
+  return sum / 8.0;
 }
 
-// Convertit la valeur lue (minVal..maxVal) en 0..32767 (inverse : bas = enfonce)
+int readSmooth(int pin) {
+  return (int)(readSmoothF(pin) + 0.5);
+}
+
 int mapPedale(int val, int minVal, int maxVal) {
-  if (maxVal <= minVal) return 0;   // securite : evite la division par zero
+  if (maxVal <= minVal) return 0;
   if (val > maxVal) val = maxVal;
   if (val < minVal) val = minVal;
   float ratio = (float)(maxVal - val) / (float)(maxVal - minVal);
@@ -118,21 +152,21 @@ void setup() {
   pinMode(buttonRight, INPUT_PULLUP);
   for (int i = 0; i < 6; i++) pinMode(gearPins[i], INPUT_PULLUP);
 
-  volantSmooth = readSmooth(potVolant);
+  volantSmooth = readSmoothF(potVolant);
 
-  // IMPORTANT : aucun Serial.println de texte ici,
-  // sinon le Serial Plotter affiche des courbes erronees.
+  // Aucun Serial.println de texte ici : le Serial Plotter afficherait des erreurs.
 }
 
 void loop() {
   // --- Lecture ---
-  int valVolant = readSmooth(potVolant);
+  float volantBrut = readSmoothF(potVolant);
+  int valVolant = (int)(volantBrut + 0.5);
   int valAccel  = readSmooth(potAccel);
   int valFrein  = readSmooth(potFrein);
   int valEmbr   = readSmooth(potEmbr);
 
-  // --- Volant : sans zone morte, centre asymetrique ---
-  volantSmooth = alphaVolant * valVolant + (1 - alphaVolant) * volantSmooth;
+  // --- Volant : lissage puis normalisation -1..+1 (centre asymetrique) ---
+  volantSmooth = alphaVolant * volantBrut + (1 - alphaVolant) * volantSmooth;
   float v = volantSmooth;
 
   float normVolant;
@@ -143,7 +177,24 @@ void loop() {
   }
   if (normVolant > 1.0)  normVolant = 1.0;
   if (normVolant < -1.0) normVolant = -1.0;
-  int volantMapped = (int)(normVolant * 32767.0);
+
+  // --- Conversion en valeur joystick ---
+  float joyVolant;
+  if (ANTI_DZ_DEBUT <= 0 && ANTI_DZ_FIN <= 0) {
+    // Lineaire pur : aucune compensation
+    joyVolant = normVolant * 32767.0;
+  } else {
+    float absN = fabs(normVolant);
+    if (absN < TOLERANCE_CENTRE) {
+      joyVolant = 0;                                   // repos exact au centre
+    } else {
+      float debut = ANTI_DZ_DEBUT;                     // premiere valeur envoyee
+      float fin   = 32767.0 - ANTI_DZ_FIN;             // derniere valeur envoyee
+      float signe = (normVolant > 0) ? 1.0 : -1.0;
+      joyVolant = signe * (debut + absN * (fin - debut));
+    }
+  }
+  int volantMapped = (int)joyVolant;
 
   // --- Pedales ---
   int accelMapped = mapPedale(valAccel, accelMin, accelMax);
@@ -180,10 +231,10 @@ void loop() {
   Serial.print(",Frein:");   Serial.print(valFrein);
   Serial.print(",Embr:");    Serial.print(valEmbr);
   Serial.print(",Vitesse:"); Serial.print(gearDetected * 100);
-  Serial.print(",Min:0,Max:1023");   // fixe l'echelle du graphique
+  Serial.print(",Min:0,Max:1023");
   Serial.println();
 #else
-  Serial.print("Volant:");   Serial.print(normVolant * 100.0);
+  Serial.print("Volant:");   Serial.print(volantMapped * 100.0 / 32767.0);
   Serial.print(",Accel:");   Serial.print(accelSmooth * 100.0 / 32767.0);
   Serial.print(",Frein:");   Serial.print(freinSmooth * 100.0 / 32767.0);
   Serial.print(",Embr:");    Serial.print(embrSmooth * 100.0 / 32767.0);
@@ -192,5 +243,5 @@ void loop() {
   Serial.println();
 #endif
 
-  delay(20); // ~50 Hz, confortable pour le traceur
+  delay(20);
 }
